@@ -478,7 +478,10 @@ static int get_endpoint_address(libusb_device_handle *devh, uint8_t *inendpt, ui
     if (r < 0) return r;
 
     r = libusb_get_active_config_descriptor(uDevice, &config);
+    if (r < 0) return r;
+
     if (!uDevice) return (-1);
+
     interfaces = config->interface;
     for (i = 0; i < config->bNumInterfaces; i++) {
         interface_desc = interfaces->altsetting;
@@ -499,7 +502,7 @@ static int get_endpoint_address(libusb_device_handle *devh, uint8_t *inendpt, ui
     }
     libusb_free_config_descriptor(config);
 
-    return(0);
+    return r;
 }
 
 static void IntrOut_cb(struct libusb_transfer *transfer)
