@@ -446,7 +446,7 @@ static int find_cm15a(struct libusb_device_handle **devhptr)
  */
 static int get_endpoint_address(libusb_device_handle *devh, uint8_t *inendpt, uint8_t *outendpt)
 {
-    int r;
+    int r = 0;
     struct libusb_config_descriptor *config;
     const struct libusb_interface *interfaces;
     const struct libusb_interface_descriptor *interface_desc;
@@ -464,6 +464,7 @@ static int get_endpoint_address(libusb_device_handle *devh, uint8_t *inendpt, ui
 
     r = libusb_get_active_config_descriptor(uDevice, &config);
     if (r < 0) return r;
+
     interfaces = config->interface;
     for (i = 0; i < config->bNumInterfaces; i++) {
         interface_desc = interfaces->altsetting;
@@ -483,6 +484,8 @@ static int get_endpoint_address(libusb_device_handle *devh, uint8_t *inendpt, ui
         interfaces++;
     }
     libusb_free_config_descriptor(config);
+
+    return r;
 }
 
 static void IntrOut_cb(struct libusb_transfer *transfer)
