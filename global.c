@@ -24,6 +24,8 @@
 
 int Cm19a = 0;
 
+int PollTimeOut = -1;
+
 /* 1 bit per house code, 1=RF to PL, 0=off, default all house codes on */
 unsigned short RfToPl16 = 0xFFFF;
 
@@ -44,5 +46,5 @@ int _dbprintf(const char *fmt, ...)
     strcat(fmtbig, fmt);
     buflen = vsprintf(buf, fmtbig, args);
     va_end(args);
-    return fprintf(stderr, buf);
+    return fprintf(stderr, "%s", buf);
 }

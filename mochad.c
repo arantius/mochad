@@ -28,6 +28,8 @@
  * supports macros, timers, or RTC so it can be used as-is.
  */
 
+#define IPV6    0
+
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
@@ -42,8 +44,13 @@
 /**** system log ****/
 #include <syslog.h>
 
+/**** ioctl ****/
+#include <sys/ioctl.h>
+
 /* Multiple On-line Controllers Home Automation Daemon */
 #define DAEMON_NAME "mochad"
+
+#define LEVEL LOG_INFO // was originally LOG_EMERG
 
 /**** socket ****/
 
@@ -55,15 +62,18 @@
 #define SERVER_PORT     (1099)
 #define MAXCLISOCKETS   (32)
 #define MAXSOCKETS      (1+MAXCLISOCKETS)
-                            /* first socket=listen socket, 20 client sockets */
+				/* first socket=listen socket, 32 client sockets */
 #define USB_FDS         (10)    /* libusb file descriptors */
+
 static struct pollfd Clients[(3*MAXSOCKETS)+USB_FDS];
+
 /* Client sockets */
 static struct pollfd Clientsocks[MAXCLISOCKETS];
 static struct pollfd Clientxmlsocks[MAXCLISOCKETS];
 static struct pollfd Clientor20socks[MAXCLISOCKETS];
-static size_t NClients;     /* # of valid entries in Clientsocks */
-static size_t NxmlClients;  /* # of valid entries in Clientxmlsocks */
+
+static size_t NClients;     /* # of valid entries in Clientsocks     */
+static size_t NxmlClients;  /* # of valid entries in Clientxmlsocks  */
 static size_t Nor20Clients; /* # of valid entries in Clientor20socks */
 
 /**** USB usblib 1.0 ****/
@@ -71,9 +81,10 @@ static size_t Nor20Clients; /* # of valid entries in Clientor20socks */
 #include <libusb-1.0/libusb.h>
 uint8_t InEndpoint, OutEndpoint;
 
-static struct libusb_device_handle *Devh = NULL;
+static struct libusb_device_handle *Devh        = NULL;
 static struct libusb_transfer *IntrOut_transfer = NULL;
-static struct libusb_transfer *IntrIn_transfer = NULL;
+static struct libusb_transfer *IntrIn_transfer  = NULL;
+
 static unsigned char IntrOutBuf[8];
 static unsigned char IntrInBuf[8];
 
@@ -353,7 +364,10 @@ static int copy_clients(struct pollfd *Clients)
 #include "encode.h"
 #include "decode.h"
 
-
+/*
+** This is interesting, it might be a good idea to create a text file which
+** can be read in at startup (hmm, need to think that through)
+*/
 
 struct binarydata {
     size_t binlength;
@@ -397,9 +411,11 @@ static void initcm1Xa(const struct binarydata *p)
     }
 }
 
-/* Find CM15A or CM19A. The EU versions (CM15Pro and CM19Pro) have the same
- * vendor and product IDs, respectively.
- */
+/*
+** Find CM15A or CM19A. The EU versions (CM15Pro and CM19Pro) have the same
+** vendor and product IDs, respectively.
+*/
+
 static int find_cm15a(struct libusb_device_handle **devhptr)
 {
     int r;
@@ -409,7 +425,7 @@ static int find_cm15a(struct libusb_device_handle **devhptr)
     if (!*devhptr) {
         *devhptr = libusb_open_device_with_vid_pid(NULL,  0x0bc7, 0x0002);
         if (!*devhptr) {
-            syslog(LOG_EMERG, "libusb_open_device_with_vid_pid failed");
+            syslog(LEVEL, "libusb_open_device_with_vid_pid failed");
             return -EIO;
         }
         Cm19a = 1;
@@ -419,22 +435,22 @@ static int find_cm15a(struct libusb_device_handle **devhptr)
         syslog(LOG_NOTICE, (Cm19a) ? "Found CM19A" : "Found CM15A");
         return 0;
     }
-    syslog(LOG_EMERG, "usb_claim_interface failed %d", r);
+    syslog(LEVEL, "usb_claim_interface failed %d", r);
     r = libusb_kernel_driver_active(*devhptr, 0);
     if (r < 0) {
-        syslog(LOG_EMERG, "Kernel driver check failed %d", r);
+        syslog(LEVEL, "Kernel driver check failed %d", r);
         return -EIO;
     }
     syslog(LOG_NOTICE, "Found kernel driver %d, trying detach", r);
     r = libusb_detach_kernel_driver(*devhptr, 0);
     if (r < 0) {
-        syslog(LOG_EMERG, "Kernel driver detach failed %d", r);
+        syslog(LEVEL, "Kernel driver detach failed %d", r);
         return -EIO;
     }
     Reattach = 1;
     r = libusb_claim_interface(*devhptr, 0);
     if (r < 0) {
-        syslog(LOG_EMERG, "claim interface failed again %d", r);
+        syslog(LEVEL, "claim interface failed again %d", r);
         return -EIO;
     }
     syslog(LOG_NOTICE, (Cm19a) ? "Found CM19A" : "Found CM15A");
@@ -451,7 +467,6 @@ static int get_endpoint_address(libusb_device_handle *devh, uint8_t *inendpt, ui
     const struct libusb_interface *interfaces;
     const struct libusb_interface_descriptor *interface_desc;
     const struct libusb_endpoint_descriptor *endpoint_desc;
-    struct libusb_endpoint_descriptor endpt0, endpt1;
     struct libusb_device *uDevice;
     struct libusb_device_descriptor desc;
     int i, j, k;
@@ -463,8 +478,7 @@ static int get_endpoint_address(libusb_device_handle *devh, uint8_t *inendpt, ui
     if (r < 0) return r;
 
     r = libusb_get_active_config_descriptor(uDevice, &config);
-    if (r < 0) return r;
-
+    if (!uDevice) return (-1);
     interfaces = config->interface;
     for (i = 0; i < config->bNumInterfaces; i++) {
         interface_desc = interfaces->altsetting;
@@ -485,7 +499,7 @@ static int get_endpoint_address(libusb_device_handle *devh, uint8_t *inendpt, ui
     }
     libusb_free_config_descriptor(config);
 
-    return r;
+    return(0);
 }
 
 static void IntrOut_cb(struct libusb_transfer *transfer)
@@ -595,7 +609,9 @@ static int mydaemon(void)
     int clifd, listenfd, flashxmlfd, or20fd;
     unsigned char buf[1024];
     int bytesIn;
-    struct sockaddr_in cliaddr, servaddr;
+
+//   struct sockaddr_in cliaddr, servaddr;
+
     int rc;
     static const int optval=1;
 
@@ -610,7 +626,7 @@ static int mydaemon(void)
 
     r = libusb_init(NULL);
     if (r < 0) {
-        syslog(LOG_EMERG, "failed to initialise libusb %d", r);
+        syslog(LEVEL, "failed to initialise libusb %d", r);
         dbprintf("failed to initialise libusb %d\n", r);
         exit(1);
     }
@@ -626,14 +642,14 @@ static int mydaemon(void)
 #endif
     r = find_cm15a(&Devh);
     if (r < 0) {
-        syslog(LOG_EMERG, "Could not find/open CM15A/CM19A %d", r);
+        syslog(LEVEL, "Could not find/open CM15A/CM19A %d", r);
         dbprintf("Could not find/open CM15A/CM19A %d\n", r);
         goto out;
     }
 
     r = get_endpoint_address(Devh, &InEndpoint, &OutEndpoint);
     if (r < 0) {
-        syslog(LOG_EMERG, "Could not find endpoints %d", r);
+        syslog(LEVEL, "Could not find endpoints %d", r);
         dbprintf("Could not find endpoints %d\n", r);
         goto out_deinit;
     }
@@ -655,7 +671,8 @@ static int mydaemon(void)
     sigact.sa_handler = sighandler;
     sigemptyset(&sigact.sa_mask);
     sigact.sa_flags = 0;
-    sigaction(SIGINT, &sigact, NULL);
+
+    sigaction(SIGINT,  &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
     sigaction(SIGQUIT, &sigact, NULL);
 
@@ -674,63 +691,238 @@ static int mydaemon(void)
     nusbfds -= 3;  /* Adjust for skipping 0,1,2 */
     dbprintf("nusbfds %lu\n", nusbfds);
     memset(&timeout, 0, sizeof(timeout));
+
     if (Cm19a)
         initcm1Xa(initcm19abinary);
     else
         initcm1Xa(initcm15abinary);
 
+    /*
+    ** Basically listen & bind on IPv4, listen & bind on IPv4 port+1, listen & bind on IPv6
+    */
+
     /**** sockets ****/
+#if defined(IPV6)
+    /* -------------------------------------------------------------------- */
+    /* Listen socket for IPv4 clients*/
+
+    // http://publib.boulder.ibm.com/infocenter/iseries/v6r1m0/topic/rzab6/xacceptboth.htm
+    // http://tldp.org/HOWTO/html_single/Linux+IPv6-HOWTO/#CHAPTER-PROGRAMMING
+    // may be of interest: network programming
+    // http://www.cs.utah.edu/~swalton/listings/sockets/programs/
+
+    /*
+    ** Careful! This part is not ready yet!
+    */
+    struct sockaddr_in6 servaddr, cliaddr;
+
+    int on = 1;
+
+    listenfd = socket(AF_INET6, SOCK_STREAM, 0);
+    dbprintf("listenfd %d\n", listenfd);
+
+    /*********************************************************************/
+    /* After the socket descriptor is created, a bind() function gets a  */
+    /* unique name for the socket.  In this example, the user sets the   */
+    /* address to in6addr_any, which (by default) allows connections to  */
+    /* be established from any IPv4 or IPv6 client that specifies port   */
+    /* SERVER_PORT. (that is, the bind is done to both the IPv4 and IPv6 */
+    /* TCP/IP stacks).  This behavior can be modified using the          */
+    /* IPPROTO_IPV6 level socket option IPV6_V6ONLY if required.         */
+    /*********************************************************************/
+
+    // As per:
+    // http://publib.boulder.ibm.com/infocenter/iseries/v6r1m0/topic/rzab6/xacceptboth.htm
+
+    memset(&servaddr, 0, sizeof(servaddr));
+
+    servaddr.sin6_family = AF_INET6;
+    servaddr.sin6_addr   = in6addr_any;
+    servaddr.sin6_port   = htons(SERVER_PORT); // Same server port as IPv4
+
+    /* -------------------------------------------------------------------- */
+    /* Listen socket for IPv6 Flash XML clients */
+    // IPv6 port+1
+
+    /* -------------------------------------------------------------------- */
+#else
+    /* -------------------------------------------------------------------- */
+    /* Listen socket for IPv4 */
+    // IPv4
+    struct sockaddr_in servaddr, cliaddr;
+
     listenfd = socket(AF_INET, SOCK_STREAM, 0);
     dbprintf("listenfd %d\n", listenfd);
-    memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    servaddr.sin_port = htons(SERVER_PORT);
 
-    rc = setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    dbprintf("setsockopt() %d/%d\n", rc, errno);
+    memset(&servaddr, 0, sizeof(servaddr));
+
+    servaddr.sin_family      = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port        = htons(SERVER_PORT);
+#endif
+
+    /********************************************************************/
+    /* The setsockopt() function is used to allow the local address to  */
+    /* be reused when the server is restarted before the required wait  */
+    /* time expires.                                                    */
+    /********************************************************************/
+    if(setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0) {
+      perror("setsockopt(SO_REUSEADDR) failed");
+      exit(errno);
+    }
+
+    //rc = setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    //dbprintf("setsockopt() %d/%d\n", rc, errno);
+
     rc = bind(listenfd, (struct sockaddr*) &servaddr, sizeof(servaddr));
     dbprintf("bind() %d/%d\n", rc, errno);
+
     rc = listen(listenfd, 128);
+    // Why am I doing this ???
+    ioctl(listenfd, FIONBIO, &on);
     dbprintf("listen() %d/%d\n", rc, errno);
 
+#ifdef IPV6
+    /* -------------------------------------------------------------------- */
+    /* Listen spcket for IPv4 clients*/
+
+    flashxmlfd = socket(AF_INET6, SOCK_STREAM, 0);
+    dbprintf("flashxmlfd %d\n", flashxmlfd);
+
+    /*********************************************************************/
+    /* After the socket descriptor is created, a bind() function gets a  */
+    /* unique name for the socket.  In this example, the user sets the   */
+    /* address to in6addr_any, which (by default) allows connections to  */
+    /* be established from any IPv4 or IPv6 client that specifies port   */
+    /* SERVER_PORT. (that is, the bind is done to both the IPv4 and IPv6 */
+    /* TCP/IP stacks).  This behavior can be modified using the          */
+    /* IPPROTO_IPV6 level socket option IPV6_V6ONLY if required.         */
+    /*********************************************************************/
+
+    // As per:
+    // http://publib.boulder.ibm.com/infocenter/iseries/v6r1m0/topic/rzab6/xacceptboth.htm
+
+    memset(&servaddr, 0, sizeof(servaddr));
+
+    servaddr.sin6_family = AF_INET6;
+    servaddr.sin6_addr   = in6addr_any;
+    servaddr.sin6_port   = htons(SERVER_PORT+1); // Same server port as IPv4
+
+    /* -------------------------------------------------------------------- */
+    /* Listen socket for IPv6 Flash XML clients */
+    // IPv6 port+1
+
+    /* -------------------------------------------------------------------- */
+#else
+    /* -------------------------------------------------------------------- */
     /* Listen socket for Flash XML clients */
+    // IPv4 port+1
     flashxmlfd = socket(AF_INET, SOCK_STREAM, 0);
     dbprintf("flashxmlfd %d\n", flashxmlfd);
-    memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    servaddr.sin_port = htons(SERVER_PORT+1);
 
-    rc = setsockopt(flashxmlfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    dbprintf("setsockopt() %d/%d\n", rc, errno);
+    memset(&servaddr, 0, sizeof(servaddr));
+
+    servaddr.sin_family      = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port        = htons(SERVER_PORT+1);
+#endif
+    /********************************************************************/
+    /* The setsockopt() function is used to allow the local address to  */
+    /* be reused when the server is restarted before the required wait  */
+    /* time expires.                                                    */
+    /********************************************************************/
+    if(setsockopt(flashxmlfd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0) {
+      perror("setsockopt(SO_REUSEADDR) failed");
+      exit(errno);
+    }
+
+    //rc = setsockopt(flashxmlfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    //dbprintf("setsockopt() %d/%d\n", rc, errno);
+
     rc = bind(flashxmlfd, (struct sockaddr*) &servaddr, sizeof(servaddr));
     dbprintf("bind() %d/%d\n", rc, errno);
+
     rc = listen(flashxmlfd, 128);
     dbprintf("listen() %d/%d\n", rc, errno);
 
+    /* -------------------------------------------------------------------- */
+    /* Listen socket for IPv6 Flash XML clients */
+    // IPv6 port+1
+
+    /* -------------------------------------------------------------------- */
+
+#if defined(IPV6)
+    /* -------------------------------------------------------------------- */
+    /* Listen socket for IPv4 clients*/
+
+    or20fd = socket(AF_INET6, SOCK_STREAM, 0);
+    dbprintf("flashxmlfd %d\n", flashxmlfd);
+
+    /*********************************************************************/
+    /* After the socket descriptor is created, a bind() function gets a  */
+    /* unique name for the socket.  In this example, the user sets the   */
+    /* address to in6addr_any, which (by default) allows connections to  */
+    /* be established from any IPv4 or IPv6 client that specifies port   */
+    /* SERVER_PORT. (that is, the bind is done to both the IPv4 and IPv6 */
+    /* TCP/IP stacks).  This behavior can be modified using the          */
+    /* IPPROTO_IPV6 level socket option IPV6_V6ONLY if required.         */
+    /*********************************************************************/
+
+    // As per:
+    // http://publib.boulder.ibm.com/infocenter/iseries/v6r1m0/topic/rzab6/xacceptboth.htm
+
+    memset(&servaddr, 0, sizeof(servaddr));
+
+    servaddr.sin6_family = AF_INET6;
+    servaddr.sin6_addr   = in6addr_any;
+    servaddr.sin6_port   = htons(SERVER_PORT+2); // Same server port as IPv4
+#else
+    /* -------------------------------------------------------------------- */
+    /* Listen socket for Flash XML clients */
+    // IPv4 port+1
     /* Listen socket for OR 2.0 clients */
     or20fd = socket(AF_INET, SOCK_STREAM, 0);
     dbprintf("or20fd %d\n", or20fd);
-    memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    servaddr.sin_port = htons(SERVER_PORT+2);
 
-    rc = setsockopt(or20fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    dbprintf("setsockopt() %d/%d\n", rc, errno);
+    memset(&servaddr, 0, sizeof(servaddr));
+
+    servaddr.sin_family      = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port        = htons(SERVER_PORT+2);
+#endif
+
+    /********************************************************************/
+    /* The setsockopt() function is used to allow the local address to  */
+    /* be reused when the server is restarted before the required wait  */
+    /* time expires.                                                    */
+    /********************************************************************/
+    if(setsockopt(or20fd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0) {
+      perror("setsockopt(SO_REUSEADDR) failed");
+      exit(errno);
+    }
+
+    //rc = setsockopt(or20fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    //dbprintf("setsockopt() %d/%d\n", rc, errno);
+
     rc = bind(or20fd, (struct sockaddr*) &servaddr, sizeof(servaddr));
     dbprintf("bind() %d/%d\n", rc, errno);
+
     rc = listen(or20fd, 128);
     dbprintf("listen() %d/%d\n", rc, errno);
 
+    /* -------------------------------------------------------------------- */
+
     init_client();
+
     Clients[0].fd = listenfd;
     Clients[0].events = POLLIN;
+
     Clients[1].fd = flashxmlfd;
     Clients[1].events = POLLIN;
+
     Clients[2].fd = or20fd;
     Clients[2].events = POLLIN;
+
     PollTimeOut = -1;
 
     while (!Do_exit) {
@@ -806,6 +998,7 @@ static int mydaemon(void)
                             del_client(clifd);
                         }
                         else {
+			    dbprintf("Input: %s", buf);
                             cm15a_encode(clifd, buf, (size_t)bytesIn);
                         }
                         if (--nready <= 0) break;
@@ -861,6 +1054,17 @@ static void printcopy(void)
     fflush(NULL);
 }
 
+void 
+help() {
+    printf("Copyright (C) 2010-2014 Brian Uechi.\n");
+    printf("Copyright (C) 2014 Neil Cherry.\n");
+    printf("    -d - run in foreground\n");
+    printf("    --raw-date\n");
+    printf("    --version\n");
+    printf("    --help\n");
+    printf("\n");
+}
+
 // This affects whether decode.c will show raw frame data for debugging RF connectivity
 // as well as providing raw data for parsing by users like misterhouse's X10_CMxx module.
 int raw_data = 0;
@@ -882,6 +1086,10 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "--version") == 0) {
             printf("%s\n", PACKAGE_STRING);
             printcopy();
+            exit(0);
+        } else if((strcmp(argv[i], "-h") == 0) || (strcmp(argv[i], "--help") == 0)) {
+            printf("%s\n", PACKAGE_STRING);
+	    help();
             exit(0);
         }
         else {
